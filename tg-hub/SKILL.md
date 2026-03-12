@@ -57,22 +57,25 @@ Telegram MTProto（telethon）
 
 tg-hub 使用 **MTProto 协议**（非 Bot API），需要用你的 Telegram 账号登录。
 
+> **建议**：优先使用你自己的 `TG_API_ID` / `TG_API_HASH`。
+> 我已按上游 tg-cli 的反风控实现同步：使用 Telegram Desktop 5.x 指纹，并在继续使用默认 `api_id=2040` 时给出 warning。公共 APP ID 仅作兜底，长期仍建议使用自有凭证。
+
 ```
 1. 打开 Terminal
-2. cd /var/minis/skills/tg-hub
-3. uv run python -c "
+2. （推荐）先设置自己的 TG_API_ID / TG_API_HASH
+3. cd /var/minis/skills/tg-hub
+4. uv run python -c "
    import sys; sys.path.insert(0,'.')
    from scripts.client import TGClient
    me = TGClient().login()
    print('登录成功：', me)
    "
-4. 按提示输入手机号（+86XXXXXXXXXX 格式）
-5. 输入 Telegram App 收到的验证码
-6. 登录成功后 session 自动保存，后续免登录
+5. 按提示输入手机号（+86XXXXXXXXXX 格式）
+6. 输入 Telegram App 收到的验证码
+7. 登录成功后 session 自动保存，后续免登录
 ```
 
-> **注意**：使用内置的 Telegram Desktop 公共凭证（`api_id=2040`），无需自己申请 API。
-> 如需使用自己的凭证，设置环境变量 `TG_API_ID` 和 `TG_API_HASH`。
+> 如暂时没有自己的凭证，可先用内置公共凭证登录；如遇登录/拉取异常，优先切换为自己的 APP ID。
 
 [打开 Terminal 登录](minis://open_terminal?init_command=cd%20%2Fvar%2Fminis%2Fskills%2Ftg-hub%20%26%26%20uv%20run%20python%20-c%20%22import%20sys%3B%20sys.path.insert(0%2C'.')%3B%20from%20scripts.client%20import%20TGClient%3B%20TGClient().login()%22)
 
@@ -110,7 +113,8 @@ n = client.sync("群名或用户名", limit=1000)
 print(f"新增 {n} 条消息")
 
 # 快速刷新所有群（每群最多 500 条新消息）
-result = client.refresh()
+# 默认带轻微节流；也可以限制本轮只刷前 30 个 chat
+result = client.refresh(delay=1.0, max_chats=30)
 for name, count in result.items():
     if count > 0:
         print(f"  {name}: +{count}")
@@ -159,8 +163,8 @@ print(f"本地共 {stats['total']} 条消息，{len(stats['chats'])} 个群")
 |------|------|
 | `list_chats(chat_type=None)` | 列出所有对话（实时） |
 | `sync(chat, limit=5000)` | 同步单个群到本地 SQLite |
-| `sync_all(limit_per_chat=5000)` | 同步所有群 |
-| `refresh(limit_per_chat=500)` | 快速增量刷新（推荐日常使用） |
+| `sync_all(limit_per_chat=5000, delay=1.0, max_chats=None)` | 同步所有群（带节流/数量限制） |
+| `refresh(limit_per_chat=500, delay=1.0, max_chats=None)` | 快速增量刷新（推荐日常使用） |
 
 ### 查询（本地，不联网）
 
@@ -182,17 +186,35 @@ print(f"本地共 {stats['total']} 条消息，{len(stats['chats'])} 个群")
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `TG_API_ID` | `2040`（Telegram Desktop） | 自定义 API ID |
-| `TG_API_HASH` | 内置 | 自定义 API Hash |
+| `TG_API_ID` | `2040`（仅兜底） | **推荐改为你自己的** API ID |
+| `TG_API_HASH` | 内置（仅兜底） | **推荐改为你自己的** API Hash |
 | `TG_SESSION_NAME` | `tg_hub` | Session 文件名 |
 | `TG_DATA_DIR` | `~/.tg-hub` | 数据目录 |
 | `TG_DB_PATH` | `{TG_DATA_DIR}/messages.db` | SQLite 路径 |
+| `TG_DEVICE_MODEL` | `Desktop` | Telethon 客户端设备型号 |
+| `TG_SYSTEM_VERSION` | `macOS 15.3` | Telethon 客户端系统版本 |
+| `TG_APP_VERSION` | `5.12.1` | Telethon 客户端版本 |
+| `TG_LANG_CODE` | `en` | 客户端语言代码 |
+| `TG_SYSTEM_LANG_CODE` | `en-US` | 系统语言代码 |
+
+---
+
+## 账号安全建议
+
+1. **优先使用自己的 API 凭证**：前往 `https://my.telegram.org` 创建应用后设置 `TG_API_ID` / `TG_API_HASH`。
+2. **控制同步频率**：避免高频反复执行 `refresh()`。
+3. **使用 `delay` 和 `max_chats`**：建议日常增量刷新时限制每轮同步数量，并保留 chat 之间的间隔。
+4. **首次全量同步不要太激进**：tg-hub 已对首次同步 chat 自动限制更低的抓取量。
+5. **优先读操作**：搜索/统计等本地查询不联网，风险远低于频繁同步。
 
 ---
 
 ## 注意事项
 
 - 首次登录必须在交互式 terminal 中完成（需要输入验证码）
+- **强烈建议优先使用自己的 `TG_API_ID` / `TG_API_HASH`**，避免公共 APP ID 被滥用带来的风控问题
+- tg-hub 已对齐上游 tg-cli 的 Telegram Desktop 5.x 客户端指纹，并保留环境变量覆盖能力，用于降低异常指纹风险
+- 若仍使用默认 `api_id=2040`，连接时会打印 warning，提醒改用自己的 `TG_API_ID` / `TG_API_HASH`
 - Session 文件保存在 `/var/minis/workspace/tg-hub/tg_hub.session`，妥善保管
 - `sync_all` 首次运行时间较长（取决于群数量和历史消息量）
 - 建议用 `refresh()` 做日常增量更新，用 `sync(chat, limit=10000)` 做首次全量同步

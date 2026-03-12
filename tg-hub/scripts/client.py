@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import re
 from collections import defaultdict
 from collections.abc import AsyncGenerator, Callable
@@ -23,12 +24,25 @@ from datetime import datetime, timezone
 from typing import Any
 
 from telethon import TelegramClient
+from telethon.errors import FloodWaitError
 from telethon.tl.types import Channel, Chat, User
 
-from .config import get_api_hash, get_api_id, get_session_path
+from .config import (
+    get_api_hash,
+    get_api_id,
+    get_app_version,
+    get_device_model,
+    get_lang_code,
+    get_session_path,
+    get_system_lang_code,
+    get_system_version,
+    is_default_api_id,
+)
 from .db import MessageDB
 
 log = logging.getLogger(__name__)
+
+_FIRST_SYNC_LIMIT = 500
 
 
 # ─── 内部工具 ─────────────────────────────────────────────────────────────────
@@ -47,10 +61,36 @@ def _run(coro):
     return asyncio.run(coro)
 
 
+_default_api_warned = False
+
+
 @asynccontextmanager
 async def _connect() -> AsyncGenerator[TelegramClient, None]:
     """异步上下文管理器：连接 Telegram，退出时自动断开。"""
-    c = TelegramClient(get_session_path(), get_api_id(), get_api_hash())
+    global _default_api_warned
+
+    api_id = get_api_id()
+    api_hash = get_api_hash()
+
+    if not _default_api_warned and is_default_api_id():
+        _default_api_warned = True
+        log.warning(
+            "Using default Telegram Desktop API credentials (api_id=2040). "
+            "This increases the risk of account restrictions. "
+            "Get your own at https://my.telegram.org and set TG_API_ID / TG_API_HASH."
+        )
+
+    c = TelegramClient(
+        get_session_path(),
+        api_id,
+        api_hash,
+        device_model=get_device_model(),
+        system_version=get_system_version(),
+        app_version=get_app_version(),
+        lang_code=get_lang_code(),
+        system_lang_code=get_system_lang_code(),
+        flood_sleep_threshold=120,
+    )
     await c.start()
     try:
         yield c
@@ -99,11 +139,13 @@ async def _fetch_history(
     db: MessageDB | None = None,
     on_progress: Callable[[int], None] | None = None,
     min_id: int = 0,
+    batch_delay: float = 0.5,
 ) -> int:
     """拉取历史消息存入 SQLite，返回新增条数。"""
     owns_db = db is None
     if db is None:
         db = MessageDB()
+    inserted = 0
     try:
         entity = await client.get_entity(chat)
         chat_name = (
@@ -114,20 +156,26 @@ async def _fetch_history(
         chat_id = entity.id
 
         sender_cache: dict[int, str] = {}
-        try:
-            async for user in client.iter_participants(entity):
-                sender_cache[user.id] = _get_sender_name(user) or str(user.id)
-        except Exception:
-            pass
-
         batch: list[dict] = []
-        inserted = 0
         BATCH = 200
 
         async for msg in client.iter_messages(entity, limit=limit, min_id=min_id):
             if msg.text is None and msg.message is None:
                 continue
-            sender_name = sender_cache.get(msg.sender_id) if msg.sender_id else None
+
+            sender_name = None
+            if msg.sender_id:
+                if msg.sender_id in sender_cache:
+                    sender_name = sender_cache[msg.sender_id]
+                else:
+                    try:
+                        sender = await msg.get_sender()
+                        sender_name = _get_sender_name(sender)
+                    except Exception:
+                        sender_name = None
+                    if sender_name:
+                        sender_cache[msg.sender_id] = sender_name
+
             content = msg.text or msg.message or ""
             ts = msg.date
             if ts and ts.tzinfo is None:
@@ -142,9 +190,16 @@ async def _fetch_history(
                 batch.clear()
                 if on_progress:
                     on_progress(inserted)
+                if batch_delay > 0:
+                    jitter = batch_delay * random.uniform(-0.3, 0.3)
+                    await asyncio.sleep(batch_delay + jitter)
 
         if batch:
             inserted += db.insert_batch(batch)
+        return inserted
+    except FloodWaitError as e:
+        log.warning("Telegram rate limit hit, waiting %ss...", e.seconds)
+        await asyncio.sleep(e.seconds + random.uniform(1, 3))
         return inserted
     finally:
         if owns_db:
@@ -156,6 +211,8 @@ async def _sync_all(
     db: MessageDB,
     limit_per_chat: int = 5000,
     on_chat_done: Callable[[str, int], None] | None = None,
+    delay: float = 1.0,
+    max_chats: int | None = None,
 ) -> dict[str, int]:
     results: dict[str, int] = {}
     stored = {c["chat_id"]: c for c in db.get_chats()}
@@ -164,20 +221,40 @@ async def _sync_all(
         entity = dialog.entity
         dialog_cache[entity.id] = (entity, dialog.name)
 
-    for chat_id, (entity, dialog_name) in dialog_cache.items():
+    items = list(dialog_cache.items())
+    if max_chats is not None:
+        items = items[:max_chats]
+    total = len(items)
+
+    for idx, (chat_id, (entity, dialog_name)) in enumerate(items):
         chat_info = stored.get(chat_id, {})
         chat_name = chat_info.get("chat_name") or dialog_name or str(chat_id)
         last_id = db.get_last_msg_id(chat_id) or 0
+        effective_limit = limit_per_chat
+        if last_id == 0 and limit_per_chat > _FIRST_SYNC_LIMIT:
+            effective_limit = _FIRST_SYNC_LIMIT
         try:
             count = await _fetch_history(
-                client, entity, limit=limit_per_chat, db=db, min_id=last_id,
+                client,
+                entity,
+                limit=effective_limit,
+                db=db,
+                min_id=last_id,
             )
             results[chat_name] = count
             if on_chat_done:
                 on_chat_done(chat_name, count)
+        except FloodWaitError as e:
+            log.warning("%s rate limited, waiting %ss...", chat_name, e.seconds)
+            await asyncio.sleep(e.seconds + random.uniform(1, 3))
+            results[chat_name] = 0
         except Exception as e:
             log.warning("同步 %s 失败: %s", chat_name, e)
             results[chat_name] = 0
+
+        if delay > 0 and idx < total - 1:
+            jitter = delay * random.uniform(-0.2, 0.2)
+            await asyncio.sleep(delay + jitter)
     return results
 
 
@@ -188,6 +265,7 @@ class TGClient:
     tg-hub 核心客户端，提供同步接口。
 
     首次使用需要交互式登录（手机号 + 验证码），之后 session 自动复用。
+    建议优先使用你自己的 Telegram APP ID / APP HASH，降低公共凭证被滥用带来的风控风险。
 
     用法：
         client = TGClient()
@@ -256,9 +334,20 @@ class TGClient:
                     return await _fetch_history(c, chat, limit=limit, db=db, on_progress=_progress)
         return _run(_do())
 
-    def sync_all(self, limit_per_chat: int = 5000) -> dict[str, int]:
+    def sync_all(
+        self,
+        limit_per_chat: int = 5000,
+        *,
+        delay: float = 1.0,
+        max_chats: int | None = None,
+    ) -> dict[str, int]:
         """
         同步所有对话到本地 SQLite（增量）。
+
+        Args:
+            limit_per_chat: 每个 chat 最多同步多少条
+            delay: chat 之间的等待秒数（带随机抖动）
+            max_chats: 本轮最多同步多少个 chat
 
         Returns:
             {chat_name: new_count, ...}
@@ -270,12 +359,25 @@ class TGClient:
         async def _do():
             async with _connect() as c:
                 with MessageDB() as db:
-                    return await _sync_all(c, db, limit_per_chat=limit_per_chat, on_chat_done=_on_done)
+                    return await _sync_all(
+                        c,
+                        db,
+                        limit_per_chat=limit_per_chat,
+                        on_chat_done=_on_done,
+                        delay=delay,
+                        max_chats=max_chats,
+                    )
         return _run(_do())
 
-    def refresh(self, limit_per_chat: int = 500) -> dict[str, int]:
+    def refresh(
+        self,
+        limit_per_chat: int = 500,
+        *,
+        delay: float = 1.0,
+        max_chats: int | None = None,
+    ) -> dict[str, int]:
         """快速增量刷新所有对话（每个群最多 500 条新消息）。"""
-        return self.sync_all(limit_per_chat=limit_per_chat)
+        return self.sync_all(limit_per_chat=limit_per_chat, delay=delay, max_chats=max_chats)
 
     # ── 本地查询（不联网）──────────────────────────────────────────────────
 

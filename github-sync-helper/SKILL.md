@@ -1,7 +1,7 @@
 ---
 name: github-sync-helper
 description: >
-  通用 GitHub 基础操作 + 同步/PR 自动化技能（Minis 环境）。当用户提到“GitHub 怎么用、clone、init、remote、branch、commit、push、pull、fetch、merge、rebase、tag、release、stash、submodule、fork、PR、同步到上游(upstream)、删除分支、清空目录后恢复、直推 main、一键同步”等任意 Git/GitHub 基础操作与工作流时，必须触发本技能。
+  通用 GitHub 基础操作 + GitHub 平台对象（Issues/Labels/Milestones/Releases/Actions）自动化技能（Minis 环境）。当用户提到“GitHub 怎么用、clone、init、remote、branch、commit、push、pull、fetch、merge、rebase、tag、release、issues、actions、labels、milestone、保护分支、fork、PR、同步到上游(upstream)、删除分支、清空目录后恢复、直推 main、一键同步”等任意 Git/GitHub 基础操作与工作流时，必须触发本技能。
 compatibility: >
   Requires git, python3. Uses env GITHUB_TOKEN for GitHub API + HTTPS push (non-interactive via GIT_ASKPASS).
 ---
@@ -45,15 +45,32 @@ compatibility: >
 |11| 暂存栈 | stash | 临时收起未提交改动 | `git stash` | `stash` |
 |12| 标签 | tag | 给提交打版本号 | `git tag` | `tag` |
 |13| 子模块 | submodule | 管理子仓库依赖 | `git submodule` | `submodule` |
-|14| GitHub 协作 | fork/PR | fork 后在自己仓库改，提交 PR 到上游 |（网页 + API） | `pr` |
+|15| GitHub 平台 | issues/labels/milestones/releases/actions | 通过 GitHub API 管理平台对象 |（API） | `gh-issues-list` 等（见下方） |
 
 > 注：脚本的定位是“把常用基础操作变成可复用命令”。遇到复杂 rebase/冲突，仍建议用交互式终端处理。
+
+## GitHub 平台操作（API）
+
+> 统一要求：需要 env `GITHUB_TOKEN`。
+
+| 序号 | command | 作用 |
+|---:|---|---|
+| 1 | `gh-issues-list --repo <owner/repo> [--state open|closed|all]` | 列出 Issues |
+| 2 | `gh-issue-create --repo <owner/repo> --title <t> [--body <b>]` | 创建 Issue |
+| 3 | `gh-issue-close --repo <owner/repo> --number <n>` | 关闭 Issue |
+| 4 | `gh-labels-list --repo <owner/repo>` | 列出 labels |
+| 5 | `gh-label-create --repo <owner/repo> --name <n> [--color <rrggbb>] [--description <d>]` | 创建 label |
+| 6 | `gh-milestones-list --repo <owner/repo> [--state open|closed|all]` | 列出 milestones |
+| 7 | `gh-milestone-create --repo <owner/repo> --title <t> [--description <d>] [--due <YYYY-MM-DD>]` | 创建 milestone |
+| 8 | `gh-releases-list --repo <owner/repo>` | 列出 releases |
+| 9 | `gh-release-create --repo <owner/repo> --tag <vX.Y.Z> --name <n> [--body <b>] [--draft true|false] [--prerelease true|false]` | 创建 release |
+|10| `gh-actions-list --repo <owner/repo>` | 列出 workflows |
+|11| `gh-actions-dispatch --repo <owner/repo> --workflow <id_or_file> [--ref <branch>] [--inputs <json>]` | 手动触发 workflow_dispatch |
 
 ## 脚本命令清单（gh_sync.sh）
 
 | 序号 | command | 作用 |
 |---:|---|---|
-| 1 | `init` | 在当前目录初始化 git 仓库 |
 | 2 | `clone --url <url> [--dir <path>]` | clone 仓库到指定目录 |
 | 3 | `remotes` | 显示当前 remotes |
 | 4 | `add-remote --name <n> --url <url>` | 添加远端 |
@@ -76,6 +93,7 @@ compatibility: >
 |21| `empty-dir --dir <path>` | 清空仓库内某目录但保留目录（用 .gitkeep） |
 |22| `restore-dir --src <path> --dst <path>` | 用本机目录覆盖恢复到仓库目录（会先删除 dst 内容） |
 |23| `pr --upstream <owner/repo> --head <owner:branch> --base <branch> --title <t> --body <b>` | 通过 GitHub API 创建 PR |
+|24| `gh-issues-list ...` 等 | GitHub 平台对象操作（issues/labels/milestones/releases/actions） |
 
 ## 典型工作流（示例）
 
